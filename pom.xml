@@ -4,8 +4,8 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.zerodhatech.kiteconnect</groupId>
-    <artifactId>kiteconnect</artifactId>
+    <groupId>com.zerodhatech.bookmap-kiteconnect</groupId>
+    <artifactId>bookmap-kiteconnect</artifactId>
     <version>3.0.3</version>
     <packaging>jar</packaging>
 
@@ -38,10 +38,12 @@
     </scm>
 
     <build>
+        <sourceDirectory>${project.basedir}/kiteconnect/src/</sourceDirectory>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.1</version>
                 <configuration>
                     <source>8</source>
                     <target>8</target>
@@ -80,6 +82,9 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
                 <version>2.9.1</version>
                 <executions>
                     <execution>
@@ -146,7 +151,6 @@
             <scope>system</scope>
             <systemPath>${project.basedir}/kiteconnect/libs/bm-l1api.jar</systemPath>
         </dependency>
-
         <dependency>
             <groupId>bookmap</groupId>
             <artifactId>L1api-javadoc</artifactId>
@@ -169,11 +173,6 @@
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-compress</artifactId>
             <version>1.20</version>
-        </dependency>
-        <dependency>
-            <groupId>commons-codec</groupId>
-            <artifactId>commons-codec</artifactId>
-            <version>1.14</version>
         </dependency>
         <dependency>
             <groupId>org.apache.commons</groupId>
