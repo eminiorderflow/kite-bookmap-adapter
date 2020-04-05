@@ -1,12 +1,9 @@
 package com.bookmap.provider;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zerodhatech.kiteconnect.KiteConnect;
 import com.zerodhatech.kiteconnect.kitehttp.exceptions.KiteException;
 import com.zerodhatech.models.Depth;
-import com.zerodhatech.models.Instrument;
 import com.zerodhatech.models.Tick;
-import com.zerodhatech.models.User;
 import com.zerodhatech.ticker.KiteTicker;
 
 import lombok.SneakyThrows;
@@ -29,46 +26,56 @@ import velox.api.layer1.data.SubscribeInfo;
 import velox.api.layer1.data.TradeInfo;
 
 import java.io.IOException;
+import java.text.DecimalFormat;
+import java.text.NumberFormat;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.*;
+
 
 @Layer0LiveModule(fullName = "Zerodha Kite Realtime Provider")
 public class RealTimeProvider extends ExternalLiveBaseProvider {
 
-    public static final String API_KEY = null;
-    public static final String API_SECRET = null;
-    private static final int DEPTH_LEVELS_COUNT = 5;
-    protected final HashMap<String, Instruments> aliasInstruments;
+    public static final int DEPTH_LEVELS_COUNT = 5;
+    public static final double TICK_SIZE = 0.05;
+    public static final int CONTRACT_SIZE = 20;
+
     protected Thread connectionThread = null;
 
-    public KiteTicker connector;
-    protected final ExecutorService singleThreadExecutor;
-    protected final ScheduledExecutorService singleThreadScheduledExecutor;
-    protected ObjectMapper objectMapper;
+    private static KiteTicker tickerProvider;
+    private static double prevTickPrice;
+
     protected CopyOnWriteArrayList<SubscribeInfo> knownInstruments = new CopyOnWriteArrayList<>();
     public static Map<String, Instrument> genericInstruments = new HashMap<>();
-    public final String exchange;
-    public final String wsPortNumber;
-    public final String wsLink;
-
     public static ArrayList<Long> subscribeTokens = new ArrayList<Long>();
     public static ArrayList<Long> unsubscribeTokens = new ArrayList<Long>();
 
-    public static final KiteConnect kiteConnect = new KiteConnect(API_KEY);
-    public static final KiteTicker tickerProvider = new KiteTicker(kiteConnect.getAccessToken(), kiteConnect.getApiKey());
-    public Instrument instrument = new Instrument();
+    protected static class Instrument {
+    protected final String symbol;
+    protected final double pips;
 
-    protected static class Instruments {
-        protected final String alias;
-        protected final double pips;
+    public Instrument(String symbol, double pips) {
+        this.symbol = symbol;
+        this.pips = pips;
+    }};
 
-        public Instruments(String alias, double pips) {
-            this.alias = alias;
-            this.pips = pips;
-        }
+    protected final HashMap<String, Instrument> instrument = new HashMap<>();
+
+    public static void setTickerProvider(KiteTicker newTickerProvider){
+        tickerProvider = newTickerProvider;
     }
 
-    ;
+    public static KiteTicker getTickerProvider(){
+        return tickerProvider;
+    }
+
+    public void setPrevTickPrice(double newPrevTickPrice){
+        prevTickPrice = newPrevTickPrice;
+    }
+
+    public double getPrevTickPrice(){
+        return prevTickPrice;
+    }
 
     @Data
     public static class MarketDataComponent {
@@ -101,66 +108,51 @@ public class RealTimeProvider extends ExternalLiveBaseProvider {
         int workingSells;
     }
 
-    public RealTimeProvider(String exchange, String wsPortNumber, String wsLink) {
-        aliasInstruments = new HashMap<>();
-        singleThreadExecutor = Executors.newSingleThreadExecutor();
-        singleThreadScheduledExecutor = Executors.newSingleThreadScheduledExecutor();
-        this.exchange = exchange;
-        this.wsPortNumber = wsPortNumber;
-        this.wsLink = wsLink;
-        getInstruments();
-    }
-
-    public void listenForOrderBookL2(Tick ticks) {
-        ArrayList<Depth> bidDepthTick = ticks.getMarketDepth().get("buy");
-        ArrayList<Depth> askDepthTick = ticks.getMarketDepth().get("sell");
-        for (int i = 0; i < DEPTH_LEVELS_COUNT; i++) {
-            for (Layer1ApiDataListener listener : dataListeners) {
-                listener.onDepth(String.valueOf(ticks.getInstrumentToken()), true,
-                        (int) (bidDepthTick.get(i).getPrice() * instrument.getTick_size()),
-                        bidDepthTick.get(i).getQuantity());
-                listener.onDepth(String.valueOf(ticks.getInstrumentToken()), false,
-                        (int) (askDepthTick.get(i).getPrice() * instrument.getTick_size()),
-                        askDepthTick.get(i).getQuantity());
+    public void listenForOrderBookL2() {
+        Log.info("Is connection open? " + getTickerProvider().isConnectionOpen());
+        getTickerProvider().setOnTickerArrivalListener(ticks -> {
+            Log.info("Ticks" + ticks);
+            ArrayList<Depth> bidDepthTick = ticks.get(0).getMarketDepth().get("buy");
+            ArrayList<Depth> askDepthTick = ticks.get(0).getMarketDepth().get("sell");
+            for (int i = 0; i < DEPTH_LEVELS_COUNT; i++) {
+                for (Layer1ApiDataListener listener : dataListeners) {
+                    listener.onDepth(String.valueOf(ticks.get(0).getInstrumentToken()), true,
+                            (int) (bidDepthTick.get(i).getPrice() / TICK_SIZE),
+                            bidDepthTick.get(i).getQuantity());
+                    listener.onDepth(String.valueOf(ticks.get(0).getInstrumentToken()), false,
+                            (int) (askDepthTick.get(i).getPrice() / TICK_SIZE),
+                            askDepthTick.get(i).getQuantity());
+                }
             }
-        }
+            onTradeRecord(ticks);
+        });
     }
 
-    public void onTradeRecord(Tick tradeRecord) {
-        boolean isBidAggressor = tradeRecord.getChange() < 0;
+    public void onTradeRecord(ArrayList<Tick> tradeRecord) throws NullPointerException{
+
+        boolean isBidAggressor = tradeRecord.get(0).getLastTradedPrice() >= getPrevTickPrice();
+
         boolean isOtc = false;
 
-        int size = (int) tradeRecord.getLastTradedQuantity();
+        int size = (int) tradeRecord.get(0).getLastTradedQuantity();
 
         if (isBidAggressor) {
-            dataListeners.forEach(l -> l.onTrade(String.valueOf(tradeRecord.getInstrumentToken()),
-                    Math.floor(tradeRecord.getLastTradedPrice()),
+            dataListeners.forEach(l -> l.onTrade(String.valueOf(tradeRecord.get(0).getInstrumentToken()),
+                    tradeRecord.get(0).getLastTradedPrice() / TICK_SIZE,
                     size, new TradeInfo(isOtc, isBidAggressor)));
         } else {
-            dataListeners.forEach(l -> l.onTrade(String.valueOf(tradeRecord.getInstrumentToken()),
-                    Math.ceil(tradeRecord.getLastTradedPrice()),
+            dataListeners.forEach(l -> l.onTrade(String.valueOf(tradeRecord.get(0).getInstrumentToken()),
+                    tradeRecord.get(0).getLastTradedPrice() / TICK_SIZE,
                     size, new TradeInfo(isOtc, isBidAggressor)));
 
         }
-    }
-
-    @Override
-    public void unsubscribe(String alias) {
-        synchronized (aliasInstruments) {
-            Long aliasToken = Long.valueOf(alias);
-            unsubscribeTokens.add(aliasToken);
-            subscribeTokens.remove(aliasToken);
-            tickerProvider.unsubscribe(unsubscribeTokens);
-            if (aliasInstruments.remove(alias) != null) {
-                instrumentListeners.forEach(l -> l.onInstrumentRemoved(alias));
-            }
-        }
+        setPrevTickPrice(tradeRecord.get(0).getLastTradedPrice());
+//        prevTickPrice = tradeRecord.get(0).getLastTradedPrice();
     }
 
     @Override
     public String formatPrice(String alias, double price) {
-        double pips = instrument.getTick_size();
-        return formatPriceDefault(pips, price);
+        return formatPriceDefault(TICK_SIZE, price);
     }
 
     @Override
@@ -187,24 +179,74 @@ public class RealTimeProvider extends ExternalLiveBaseProvider {
         connectionThread.start();
     }
 
-    private void handleLogin(UserPasswordLoginData userPasswordLoginData) throws KiteException, IOException {
-        String user = userPasswordLoginData.user.trim();
-        String password = userPasswordLoginData.password.trim();
-        if (!user.isEmpty() || !password.isEmpty()) {
-            adminListeners.forEach(l -> l.onLoginFailed(
-                    LoginFailedReason.WRONG_CREDENTIALS,
-                    "You have entered credentials. "
-                            + "Note that if you want to trade\nyou should connect using trading provider instead of demo.\n"
-                            + "If you don't, clear your credentials please.")
-            );
+    public void handleLogin(UserPasswordLoginData userPasswordLoginData) throws KiteException, IOException {
+        String apiKey = userPasswordLoginData.user.trim();
+        String accessToken = userPasswordLoginData.password.trim();
+        if (apiKey.isEmpty() || accessToken.isEmpty()) {
+            loginFailed();
             return;
         }
-        kiteConnect.setUserId(userPasswordLoginData.user.trim());
-        User newUser = kiteConnect.generateSession(userPasswordLoginData.password.trim(), API_SECRET);
-        kiteConnect.setAccessToken(newUser.accessToken);
-        kiteConnect.setPublicToken(newUser.publicToken);
-        getConnector().connect();
+        KiteTicker newKickerProvider = new KiteTicker(accessToken, apiKey);
+        setTickerProvider(newKickerProvider);
+        getTickerProvider().connect();
+        boolean isConnected = getTickerProvider().isConnectionOpen();
+        if (!isConnected){
+            loginFailed();
+            return;
+        }
         adminListeners.forEach(Layer1ApiAdminListener::onLoginSuccessful);
+    }
+
+    public void loginFailed() {
+        adminListeners.forEach(l -> l.onLoginFailed(
+                LoginFailedReason.WRONG_CREDENTIALS,
+                "Please provide username and password. You may need to re-generate the access token.")
+        );
+    }
+
+    @Override
+    public void subscribe(SubscribeInfo subscribeInfo) {
+        String symbol = subscribeInfo.symbol.toString();
+        String exchange = subscribeInfo.exchange;
+        String type = subscribeInfo.type;
+//        String alias = createAlias(symbol, exchange, type);
+        Long symbolToken = Long.valueOf(symbol);
+        subscribeTokens.add(symbolToken);
+        synchronized (instrument) {
+            if (instrument.containsKey(symbol)) {
+                instrumentListeners.forEach(l -> l.onInstrumentAlreadySubscribed(symbol, exchange, type));
+            } else {
+                final Instrument newInstrument = new Instrument(symbol, TICK_SIZE);
+                instrument.put(symbol, newInstrument);
+
+                final InstrumentInfo instrumentInfo = new InstrumentInfo(
+                        newInstrument.symbol,
+                        exchange,
+                        type,
+                        newInstrument.pips,
+                        newInstrument.pips * CONTRACT_SIZE,
+                        newInstrument.symbol,
+                        true);
+                getTickerProvider().subscribe(subscribeTokens);
+                getTickerProvider().setMode(subscribeTokens, KiteTicker.modeFull);
+                instrumentListeners.forEach(l -> l.onInstrumentAdded(symbol, instrumentInfo));
+                Log.info("Subscribed to " + symbol);
+                listenForOrderBookL2();
+            }
+        }
+    }
+
+    @Override
+    public void unsubscribe(String alias) {
+        synchronized (instrument) {
+            Long aliasToken = Long.valueOf(alias);
+            unsubscribeTokens.add(aliasToken);
+            subscribeTokens.remove(aliasToken);
+            getTickerProvider().unsubscribe(unsubscribeTokens);
+            if (instrument.remove(alias) != null) {
+                instrumentListeners.forEach(l -> l.onInstrumentRemoved(alias));
+            }
+        }
     }
 
     @Override
@@ -216,8 +258,8 @@ public class RealTimeProvider extends ExternalLiveBaseProvider {
     public void close() {
         try {
             Log.info("Closing connector");
-            if (connector != null) {
-                connector.disconnect();
+            if (getTickerProvider() != null) {
+                getTickerProvider().disconnect();
             }
         } catch (Exception ex) {
             Log.error("Unable to close connector", ex);
@@ -231,52 +273,9 @@ public class RealTimeProvider extends ExternalLiveBaseProvider {
         Disconnect, ConnectionFailure;
     }
 
-    public KiteTicker getConnector() {
-        boolean isConnected = tickerProvider.isConnectionOpen();
-        if (!isConnected) {
-            connector = new KiteTicker(kiteConnect.getAccessToken(), kiteConnect.getApiKey());
-        }
-        return connector;
-    }
-
-    ;
-
-    public KiteTicker getNewConnector() {
-        connector = new KiteTicker(kiteConnect.getAccessToken(), kiteConnect.getApiKey());
-        return connector;
-    }
-
-    private static String createAlias(String symbol, String exchange, String type) {
-        return symbol + "/" + exchange + "/" + type;
-    }
-
-    protected final HashMap<String, Instruments> insts = new HashMap<>();
-
-    @Override
-    public void subscribe(SubscribeInfo subscribeInfo) {
-        String symbol = subscribeInfo.symbol;
-        String exchange = subscribeInfo.exchange;
-        String type = subscribeInfo.type;
-        String alias = createAlias(symbol, exchange, type);
-        Long symbolToken = Long.valueOf(symbol);
-        subscribeTokens.add(symbolToken);
-        synchronized (insts) {
-            if (insts.containsKey(alias)) {
-                instrumentListeners.forEach(l -> l.onInstrumentAlreadySubscribed(symbol, exchange, type));
-            } else {
-                double pips = instrument.getTick_size();
-                final Instruments newInstruments = new Instruments(alias, pips);
-                insts.put(alias, newInstruments);
-
-                final InstrumentInfo instrumentInfo = new InstrumentInfo(
-                        symbol, exchange, type, newInstruments.pips, 1, "", false);
-
-                tickerProvider.subscribe(subscribeTokens);
-                tickerProvider.setMode(subscribeTokens, KiteTicker.modeFull);
-                instrumentListeners.forEach(l -> l.onInstrumentAdded(alias, instrumentInfo));
-            }
-        }
-    }
+//    private static String createAlias(String symbol, String exchange, String type) {
+//        return symbol + "/" + exchange + "/" + type;
+//    }
 
     @Override
     public Layer1ApiProviderSupportedFeatures getSupportedFeatures() {
@@ -291,11 +290,12 @@ public class RealTimeProvider extends ExternalLiveBaseProvider {
             }
 
             Instrument generic = genericInstruments.get(alias);
-            double basicTickSize = generic.getTick_size();
+            double basicTickSize = TICK_SIZE;
             List<Double> options = new ArrayList<>();
             options.add((double) basicTickSize);
             options.add((double) 5 * basicTickSize);
             options.add((double) 10 * basicTickSize);
+            options.add((double) 20 * basicTickSize);
             options.add((double) 50 * basicTickSize);
             options.add((double) 100 * basicTickSize);
             options.add((double) 500 * basicTickSize);
